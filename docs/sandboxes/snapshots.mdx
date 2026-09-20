@@ -4,6 +4,38 @@ description: Capture a sandbox's disk or full execution state as a portable arti
 icon: "code-branch"
 ---
 
+## CLI workflow
+
+Use `snap` (or `snapshot`) to save and restore state. Put the new snapshot name after `create` and use `--sandbox` to choose the sandbox to capture:
+
+```bash
+# Save files for a fresh boot
+msb snap create installed --sandbox app
+
+# Save files, memory, and running processes
+msb snap create ready --sandbox app --full
+
+# Restore into a new sandbox running in the background
+msb snap restore app:ready --name worker
+
+# Or branch live execution without saving a durable snapshot
+msb branch app --names worker-a worker-b worker-c
+```
+
+The snapshot group defaults to the source sandbox's name: `ready --sandbox app` creates `app:ready`. Groups organize saved snapshots independently of the source sandbox. Use `--group templates` to save as `templates:ready`, or omit the name to generate one. You can also use `--name ready` instead of the positional name. Disk capture is the default; `--full` explicitly includes execution state. Restore creates a new sandbox and never replaces an existing destination.
+
+| Command | Purpose |
+| --- | --- |
+| `msb snap create ready --sandbox app` | Save disk state |
+| `msb snap restore app:ready --name worker` | Create a sandbox from saved state |
+| `msb snap ls --group app` | List snapshots in a local group |
+| `msb snap inspect app:ready` | Show snapshot details |
+| `msb snap export app:ready --output ready.msb` | Export an archive |
+| `msb snap import ready.msb --group received` | Import archives into a local group |
+| `msb snap rm app:ready` | Remove a snapshot |
+
+Existing commands continue to work: `snapshot create ready --from-sandbox app`, top-level `restore`, `snapshot save app:ready ready.msb`, and `snapshot load ready.msb`. `--from-sandbox` remains an alias for `--sandbox`. Do not combine a positional name with `--name`. Full restore still requires `--forked` to opt into copy-on-write memory; direct branching already uses it.
+
 <Tooltip tip="Cloud supports stopped or crashed disk snapshots and disk restore. Live capture, full checkpoints, branching, groups, and local artifact archives remain local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 A local snapshot is a portable artifact that can hold either a sandbox's writable disk state or a full checkpoint of a running sandbox. Managed and flat OCI roots are supported; the descriptor preserves the root layout so a flat `rootfs.raw` is never mistaken for a managed OverlayFS upper. Move it with `scp`, archive it as `.msb`, or create a child sandbox from it. Cloud disk snapshots use managed storage or the organization's host volume and support create, get, list, open, remove, and dedicated disk restore. Local-only options are rejected explicitly.
@@ -35,9 +67,9 @@ On supported Linux, macOS, and Windows hosts, add `--forked` when restoring a fu
 
 ```bash
 msb create alpine --name baseline --root-disk flat:1G
-msb snapshot create ready --from-sandbox baseline --full
-msb restore baseline:ready --name worker-a --forked
-msb restore baseline:ready --name worker-b --forked
+msb snap create ready --sandbox baseline --full
+msb snap restore baseline:ready --name worker-a --forked
+msb snap restore baseline:ready --name worker-b --forked
 ```
 
 The SDK restore options are Rust `.forked()`, Python `forked=True`, TypeScript `.forked()`, and Go `WithForked()`. The option requires a full snapshot and cannot be combined with `--disk-only` or an image cold boot.
@@ -56,7 +88,7 @@ Full restore requires bindings for captured external filesystems and additional 
 
 Use `--allow-missing-resources` to resume with unavailable resources and warnings; their backend operations return `EIO`. This does not inherit resources or accept changed objects in a supplied mapping. SDK equivalents are Rust `.allow_missing_resources()`, Python `allow_missing_resources=True`, TypeScript `.allowMissingResources()`, and Go `WithAllowMissingResources()`. Direct branches retain their existing omission behavior. Disk-only restore is a cold boot, not restoration of captured external filesystem handles.
 
-Strict validation is the default for authorized mappings. For example, `msb restore saved --name child -v /host/copy:/work --external-mount-policy relaxed` accepts supported mismatches between the supplied directory and captured state. The SDK equivalents are Rust `.external_mount_policy(ExternalMountRestorePolicy::Relaxed)`, Python `external_mount_policy="relaxed"`, TypeScript `.externalMountPolicy("relaxed")`, and Go `WithExternalMountPolicy(ExternalMountRelaxed)`. Read warnings with Rust/Python `restore_warnings`, TypeScript `restoreWarnings`, or Go `RestoreWarnings`; each identifies the guest path, reason, and stale inode IDs. Stale captured objects fail with `ESTALE` when an operation reaches the filesystem backend. Relaxed mode does not recreate missing files, grant access to unmapped paths, or waive snapshot integrity checks.
+Strict validation is the default for authorized mappings. For example, `msb snap restore saved --name child -v /host/copy:/work --external-mount-policy relaxed` accepts supported mismatches between the supplied directory and captured state. The SDK equivalents are Rust `.external_mount_policy(ExternalMountRestorePolicy::Relaxed)`, Python `external_mount_policy="relaxed"`, TypeScript `.externalMountPolicy("relaxed")`, and Go `WithExternalMountPolicy(ExternalMountRelaxed)`. Read warnings with Rust/Python `restore_warnings`, TypeScript `restoreWarnings`, or Go `RestoreWarnings`; each identifies the guest path, reason, and stale inode IDs. Stale captured objects fail with `ESTALE` when an operation reaches the filesystem backend. Relaxed mode does not recreate missing files, grant access to unmapped paths, or waive snapshot integrity checks.
 
 Full snapshots also retain clean guest filesystem cache pages. Reads or memory mappings may therefore return previously captured bytes before reaching the backend; relaxed restore does not promise immediate cache invalidation. Capture synchronizes dirty guest writes before admitting external mounts, so the saved cache is not permission to replay stale dirty writes onto a changed destination.
 
@@ -101,10 +133,10 @@ msb exec baseline -- pip install requests
 msb stop baseline
 
 # 2. Snapshot the stopped sandbox
-msb snapshot create after-pip-install --from-sandbox baseline
+msb snap create after-pip-install --sandbox baseline
 
 # 3. Boot a fresh sandbox from the snapshot
-msb restore baseline:after-pip-install --name worker
+msb snap restore baseline:after-pip-install --name worker
 msb exec worker -- python -c "import requests; print(requests.__version__)"
 ```
 
@@ -131,13 +163,13 @@ Use `required` on a full snapshot when you also want to restore its disks withou
 `skip` on a disk-only snapshot accepts crash-consistent root and owned disks: recent buffered writes may be absent and filesystem recovery may be needed. Full snapshots and branches retain those dirty pages in captured RAM. An owned disk does not force guest writeback during plain pause. Earlier guest-flush builds flushed root and owned disks unconditionally when any owned mount existed; do not rely on that incidental behavior with `skip`.
 
 ```bash
-msb snapshot create disk --from-sandbox worker
-msb snapshot create full --from-sandbox worker --full --guest-flush required
+msb snap create disk --sandbox worker
+msb snap create full --sandbox worker --full --guest-flush required
 msb branch worker --name child --guest-flush skip
 
 # Prepare a flush boundary before pausing; capture keeps the source paused.
 msb pause worker --guest-flush required
-msb snapshot create paused --from-sandbox worker
+msb snap create paused --sandbox worker
 msb resume worker
 ```
 
@@ -177,13 +209,13 @@ child, err := source.Branch(ctx, "child", msb.WithBranchGuestFlush(msb.GuestFlus
 Use a bare group to restore its selected head, or `group:member` for an exact checkpoint:
 
 ```bash
-msb snapshot create cp01 --from-sandbox baseline --group work
-msb snapshot create cp02 --from-sandbox baseline --group work
-msb restore work --name latest
-msb restore work:cp01 --name earlier
+msb snap create cp01 --sandbox baseline --group work
+msb snap create cp02 --sandbox baseline --group work
+msb snap restore work --name latest
+msb snap restore work:cp01 --name earlier
 
-msb snapshot head work           # Show the selected snapshot ID
-msb snapshot head work:cp01      # Explicitly select an earlier checkpoint
+msb snap head work           # Show the selected snapshot ID
+msb snap head work:cp01      # Explicitly select an earlier checkpoint
 ```
 
 The first snapshot initializes the head. Later captures or imports advance it only when known ancestry proves they descend from the current head. Importing an older checkpoint, a sibling, or one with missing history keeps the head unchanged. Both members remain available. Concurrent siblings use the first successful head update; the other capture still succeeds. There is no special main branch and timestamps do not decide the winner.
@@ -194,11 +226,11 @@ work:cp01 ---- work:cp02 ---- work:cp03  <- head
                      +------ work:experiment
 ```
 
-`msb snapshot head work:experiment` selects the other branch. Import with `--set-head` to explicitly select the imported archive's head. Missing historical checkpoints are allowed if the snapshot's disk and RAM dependencies are complete. Imports resolve payload dependencies from the supplied archives and an explicitly named destination group; `--base` supplies an external fallback.
+`msb snap head work:experiment` selects the other branch. Import with `--set-head` to explicitly select the imported archive's head. Missing historical checkpoints are allowed if the snapshot's disk and RAM dependencies are complete. Imports resolve payload dependencies from the supplied archives and an explicitly named destination group; `--base` supplies an external fallback.
 
 ```bash
-msb snapshot load checkpoint.msb --group work
-msb snapshot load experiment.msb --group work --set-head
+msb snap import checkpoint.msb --group work
+msb snap import experiment.msb --group work --set-head
 ```
 
 Loading without `--group` creates a fresh generated group. The same archive can be imported into different groups without overwriting either copy. Within a group, an identical ID/descriptor is reusable; conflicting IDs or names fail. A current head cannot be removed while other members remain—select another first. Existing flat snapshot directories can still be opened by explicit path.
@@ -210,15 +242,15 @@ An interrupted call may already have published its snapshot. Inspect the group b
 Import a baseline and its dependent archives together. The shell expands the wildcard; archive order does not matter:
 
 ```bash
-msb snapshot load checkpoints/*.msb --group received
-msb snapshot load changes.msb base.msb --group received --dest /mnt/snapshots
+msb snap import checkpoints/*.msb --group received
+msb snap import changes.msb base.msb --group received --dest /mnt/snapshots
 ```
 
-`load` accepts one or more archive paths. Use `--dest DIR` for a different group-store root; a trailing positional path is another archive, not a destination. A batch without `--group` creates one generated group for all its archives. Existing single-archive calls still print the digest followed by the installed path. Multi-archive calls print each result and report the batch's head decision once.
+`import` (also available as `load`) accepts one or more archive paths. Use `--dest DIR` for a different group-store root; a trailing positional path is another archive, not a destination. A batch without `--group` creates one generated group for all its archives. Existing single-archive calls still print the digest followed by the installed path. Multi-archive calls print each result and report the batch's head decision once.
 
-Dependencies are resolved from the batch and exact matching snapshots already installed in the explicitly named destination group. For example, after importing `base.msb` into `received`, `msb snapshot load changes.msb --group received` can reuse that base automatically. Use `--base SOURCE` when a dependency must come from another installed snapshot or standalone archive. Imports do not search unrelated groups or nearby archive files. These operations accept the existing archive format; no format conversion or schema bump is required.
+Dependencies are resolved from the batch and exact matching snapshots already installed in the explicitly named destination group. For example, after importing `base.msb` into `received`, `msb snap import changes.msb --group received` can reuse that base automatically. Use `--base SOURCE` when a dependency must come from another installed snapshot or standalone archive. Imports do not search unrelated groups or nearby archive files. These operations accept the existing archive format; no format conversion or schema bump is required.
 
-All requested members are validated before publication. A batch with one tip follows the normal head-update rules. If a batch contains divergent tips, the existing group head stays selected; a new group has no head until you choose a member with `msb snapshot head GROUP:MEMBER`. `--set-head` requires a unique batch tip and rejects an ambiguous batch before publishing members. The final printed result is not necessarily the selected head.
+All requested members are validated before publication. A batch with one tip follows the normal head-update rules. If a batch contains divergent tips, the existing group head stays selected; a new group has no head until you choose a member with `msb snap head GROUP:MEMBER`. `--set-head` requires a unique batch tip and rejects an ambiguous batch before publishing members. The final printed result is not necessarily the selected head.
 
 ## Capture from the SDK
 
@@ -269,11 +301,11 @@ fmt.Println(snap.Digest()) // sha256:...
 ```
 
 ```bash CLI
-msb snapshot create after-pip-install --from-sandbox baseline
-msb snapshot create ready-with-label --from-sandbox baseline --label stage=ready
+msb snap create after-pip-install --sandbox baseline
+msb snap create ready-with-label --sandbox baseline --label stage=ready
 
 # Use another group-store root: /mnt/big/baseline/snap_<id>/
-msb snapshot create after-pip-install --from-sandbox baseline --dest-dir /mnt/big
+msb snap create after-pip-install --sandbox baseline --dest-dir /mnt/big
 ```
 </CodeGroup>
 
@@ -316,7 +348,7 @@ snap, err := m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
 ```
 
 ```bash CLI
-msb snapshot create worker-checkpoint --from-sandbox worker --full
+msb snap create worker-checkpoint --sandbox worker --full
 ```
 </CodeGroup>
 
@@ -339,8 +371,8 @@ Full restore and branching preserve the virtual gateway's identity so cached ARP
 Repeated disk and full checkpoints add disk layers. You choose when to export changes and when to compact; neither happens automatically.
 
 ```bash
-msb snapshot create checkpoint-b --from-sandbox worker --full
-msb snapshot save worker:checkpoint-b changes.msb --since worker:checkpoint-a
+msb snap create checkpoint-b --sandbox worker --full
+msb snap export worker:checkpoint-b --output changes.msb --since worker:checkpoint-a
 msb modify worker --compact --layers 3 --dry-run
 msb modify worker --compact --layers 3
 msb modify worker --compact --disk /data --layers 3
@@ -358,8 +390,8 @@ The aggregate `total_us` covers the whole operation, and `pause_us` measures the
 `--since` omits root and owned-disk layers and, for full checkpoints, RAM objects already supplied by the base. The base must be an exact physical prefix for the root and every owned disk present in both snapshots. A newly added owned disk is exported completely. Owned directory namespaces are always complete; unchanged immutable file payloads can be supplied by the base. Each full archive still includes its complete memory map and CPU/device state; it does not replay earlier memory images. Alternatively, `--last-layers 2` selects the newest root-disk layers while retaining complete owned disks and all required RAM objects. Import these smaller archives with their bases in the same batch, into a named group containing their dependencies, or with an explicit external base. Direct restore still accepts an explicit base:
 
 ```bash
-msb snapshot load changes.msb --base worker:checkpoint-a --group imported
-msb restore changes.msb --name child --snapshot-base worker:checkpoint-a
+msb snap import changes.msb --base worker:checkpoint-a --group imported
+msb snap restore changes.msb --name child --snapshot-base worker:checkpoint-a
 ```
 
 An explicit external base can also be a standalone snapshot archive. Dependent archives can supply one another within a batch; they need not be loaded in dependency order. Loads resolve disk and RAM dependencies without starting a VM; only the final sandbox creation resumes execution. Missing or incorrect dependencies fail before publication or execution. Loaded snapshots and restored children own their required files, so removing the base later does not break them. Direct restore skips installing an intermediate snapshot. Add `--disk-only` to cold-boot only disk state. After compacting any root or owned-disk prefix, export a new standalone baseline before using `--since` again: a mismatch in any matched disk refuses the export rather than silently including that disk in full. Do not combine compaction with unrelated `modify` options, or `--since`/`--last-layers` with each other or `--with-parents`/whole-group exports.
@@ -409,8 +441,8 @@ archive, err := m.Snapshot.CreateArchive(ctx, m.SnapshotArchiveOptions{
 ```
 
 ```bash CLI
-msb snapshot create after-pip-install \
-    --from-sandbox baseline \
+msb snap create after-pip-install \
+    --sandbox baseline \
     -o /tmp/after-pip-install.msb
 ```
 </CodeGroup>
@@ -420,14 +452,14 @@ Direct capture publishes only the archive and returns its snapshot ID and path. 
 An explicit archive path can also be used directly as the source of a new sandbox:
 
 ```bash
-msb restore ./after-pip-install.msb --name worker
+msb snap restore ./after-pip-install.msb --name worker
 msb exec worker -- python -V
 ```
 
 The same archive path works with the SDK restore methods shown below. The archive is unpacked into child-owned staging, so no intermediate installed snapshot is loaded into `~/.microsandbox/snapshots`.
 
 <Note>
-Direct capture records the pinned image identity, but does not bundle the cached OCI image. A flat snapshot already contains the complete disk, so restore only needs the pinned image's configuration from cache or the registry; it does not download the original disk layers again. Layered snapshots still need their base image artifacts. For an offline target, create an installed snapshot and use `msb snapshot save --with-image`: it bundles image configuration for flat roots, and the complete base-image cache for layered roots.
+Direct capture records the pinned image identity, but does not bundle the cached OCI image. A flat snapshot already contains the complete disk, so restore only needs the pinned image's configuration from cache or the registry; it does not download the original disk layers again. Layered snapshots still need their base image artifacts. For an offline target, create an installed snapshot and use `msb snap export --with-image`: it bundles image configuration for flat roots, and the complete base-image cache for layered roots.
 </Note>
 
 ## Boot from a snapshot
@@ -463,14 +495,14 @@ sb, err := m.RestoreSandbox(ctx, "baseline:after-pip-install", "worker")
 ```
 
 ```bash CLI
-msb restore baseline:after-pip-install --name worker
+msb snap restore baseline:after-pip-install --name worker
 msb exec worker -- python -V
 ```
 </CodeGroup>
 
 For disk state, creation cold-boots from a child-owned writable copy. For checkpoint state, creation eagerly restores the captured execution into child-owned state.
 
-A full restore does not also run the image CMD: the captured processes are already the workload. `msb restore` runs the restored sandbox in the background. Run new commands afterward with `msb exec`.
+A full restore does not also run the image CMD: the captured processes are already the workload. `msb snap restore` runs the restored sandbox in the background. Run new commands afterward with `msb exec`.
 
 To discard the captured execution and cold-boot only its filesystem state, select disk-only restore:
 
@@ -503,7 +535,7 @@ sb, err := m.RestoreSandbox(ctx, "worker:worker-checkpoint", "worker",
 ```
 
 ```bash CLI
-msb restore worker:worker-checkpoint --name worker --disk-only
+msb snap restore worker:worker-checkpoint --name worker --disk-only
 ```
 </CodeGroup>
 
@@ -560,15 +592,16 @@ _, err = m.Snapshot.Reindex(ctx, "/data/snapshots")
 ```
 
 ```bash CLI
-msb snapshots                  # Also: msb snaps, msb snapshot ls
-msb snapshot inspect baseline:after-pip-install
-msb snapshot rm baseline:after-pip-install
+msb snap ls                    # Also: msb snapshots, msb snaps
+msb snap ls --group baseline    # Only this local group
+msb snap inspect baseline:after-pip-install
+msb snap rm baseline:after-pip-install
 
 # Also if it has indexed children
-msb snapshot rm baseline:after-pip-install --force
+msb snap rm baseline:after-pip-install --force
 
 # Rebuild the index from artifacts on disk
-msb snapshot reindex
+msb snap reindex
 ```
 </CodeGroup>
 
@@ -584,13 +617,13 @@ scp -r ~/.microsandbox/snapshots/baseline/snap_<id> other-host:/tmp/saved-snapsh
 # Open that copied artifact by its explicit path; use archive load to add it to a group.
 
 # Bundle into a .msb, transport, then load
-msb snapshot save baseline:after-pip-install /tmp/snap.msb
+msb snap export baseline:after-pip-install --output /tmp/snap.msb
 scp /tmp/snap.msb other-host:
-ssh other-host msb snapshot load /tmp/snap.msb
+ssh other-host msb snap import /tmp/snap.msb
 
 # Fully offline: include the OCI image cache so the target needs no network
-msb snapshot save baseline:after-pip-install /tmp/snap.msb --with-image
-ssh other-host msb snapshot load /tmp/snap.msb
+msb snap export baseline:after-pip-install --output /tmp/snap.msb --with-image
+ssh other-host msb snap import /tmp/snap.msb
 ```
 
 Archives use tar + zstd by default; `.msb` is the recommended filename extension. Pass `--plain-tar` for uncompressed tar. SDKs expose the same save and load operations as the CLI.
@@ -661,7 +694,7 @@ err := snapshot.CopyTo("/tmp/snapshot-copy.tar.zst").
 
 Disk content hashing is optional for disk snapshots, full snapshots and local branches. By default, capture records disk structure and file sizes without scanning the disk for a content hash. Use `--integrity` when you want a persistent disk-content check; already-recorded hashes are retained. Full snapshots still use content-addressed RAM objects. Local branches do not hash RAM.
 
-For example, `msb snapshot create saved --from-sandbox source --full --integrity` records disk integrity alongside the full capture. `msb branch source --name child --integrity` opts in for a local branch. SDKs expose this as `.record_integrity()` in Rust, `record_integrity=True` in Python, `{ recordIntegrity: true }` on TypeScript branches, and `WithBranchIntegrity()` in Go.
+For example, `msb snap create saved --sandbox source --full --integrity` records disk integrity alongside the full capture. `msb branch source --name child --integrity` opts in for a local branch. SDKs expose this as `.record_integrity()` in Rust, `record_integrity=True` in Python, `{ recordIntegrity: true }` on TypeScript branches, and `WithBranchIntegrity()` in Go.
 
 Recorded disk integrity uses a fixed 64 KiB-leaf BLAKE3 Merkle tree: known sparse holes collapse into precomputed zero subtrees, while allocated bytes are read and hashed. Verification checks recorded hashes; without them, same-length disk-content corruption cannot be detected by the snapshot layer. File-size, structure and backing-chain checks still apply.
 
@@ -724,23 +757,23 @@ report, err := snap.Verify(ctx)
 
 ```bash CLI
 # Compute and record an integrity hash at create time
-msb snapshot create after-pip-install --from-sandbox baseline --integrity
+msb snap create after-pip-install --sandbox baseline --integrity
 
 # Verify a snapshot's recorded integrity on demand
-msb snapshot verify baseline:after-pip-install
-msb snapshot inspect baseline:after-pip-install --verify
+msb snap verify baseline:after-pip-install
+msb snap inspect baseline:after-pip-install --verify
 ```
 </CodeGroup>
 
-`msb snapshot save` and `msb snapshot load` preserve recorded integrity but do not silently execute it. They still enforce the archive grammar, path confinement, entry sizes, descriptor identities, and ordinary archive-entry hashes. Run `msb snapshot verify` explicitly after receiving a snapshot when your workflow requires an independent payload scan. Released `msb-sparse-sha256-v1` descriptors remain readable and verifiable, but ordinary open, boot, save, load, and upgrade paths do not pay their full logical-size SHA cost.
+`msb snap export` and `msb snap import` preserve recorded integrity but do not silently execute it. They still enforce the archive grammar, path confinement, entry sizes, descriptor identities, and ordinary archive-entry hashes. Run `msb snap verify` explicitly after receiving a snapshot when your workflow requires an independent payload scan. Released `msb-sparse-sha256-v1` descriptors remain readable and verifiable, but ordinary open, boot, save, load, and upgrade paths do not pay their full logical-size SHA cost.
 
 ## Use cases
 
-- **Reusable build state.** Install dependencies once, snapshot, then `msb restore ... --name worker` without paying the install cost again. Common pattern for CI, agent workloads, and reproducible dev environments.
+- **Reusable build state.** Install dependencies once, snapshot, then `msb snap restore ... --name worker` without paying the install cost again. Common pattern for CI, agent workloads, and reproducible dev environments.
 - **Portable scratch state.** Capture a sandbox after a long setup, hand the artifact to a teammate or push it to shared storage, and let them boot from the same starting point.
 - **Local fork-by-copy.** Multiple sandboxes from one snapshot are independent; each copy of the upper layer diverges on its own.
-- **Disaster recovery.** Snapshot a sandbox before a risky migration; if it goes wrong, restore the pre-migration artifact with `msb restore` under a new name.
+- **Disaster recovery.** Snapshot a sandbox before a risky migration; if it goes wrong, restore the pre-migration artifact with `msb snap restore` under a new name.
 
 ## Reference
 
-For exact snapshot APIs, see [TypeScript](/sdk/typescript/snapshots), [Rust](/sdk/rust/snapshots), [Python](/sdk/python/snapshots), or [Go](/sdk/go/snapshots). The CLI examples above cover creating, inspecting, transferring, and verifying snapshots; run `msb snapshot --help` for the complete command surface.
+For exact snapshot APIs, see [TypeScript](/sdk/typescript/snapshots), [Rust](/sdk/rust/snapshots), [Python](/sdk/python/snapshots), or [Go](/sdk/go/snapshots). The CLI examples above cover creating, inspecting, transferring, and verifying snapshots; run `msb snap --help` for the complete command surface.
